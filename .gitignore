@@ -1,0 +1,21 @@
+*.~*
+src/
+build/*/*/project/
+build/*/*/lib/
+build/*/*/bin/*
+!build/*/*/bin/*.dll
+!build/*/*/bin/*.pdb
+!build/*/*/bin/*.so
+!build/*/*/bin/*.dylib
+vendor/*
+*.exe
+# *.dll
+# *.so
+# *.dylib
+*.log
+*.swp
+.idea
+.vscode
+*.patch
+*.test
+.DS_Store
