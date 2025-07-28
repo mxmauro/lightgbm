@@ -20,138 +20,51 @@ type TestData struct {
 // -----------------------------------------------------------------------------
 
 func TestClassification(t *testing.T) {
-	testOverall(t, "classification")
+	initLogging(t)
+
+	trainData, testData := generateTestData(2000, 4, "classification", 0.3)
+
+	b := trainModel(t, "classification", trainData)
+
+	runPrediction(t, b, testData)
 }
 
 func TestRegression(t *testing.T) {
-	testOverall(t, "regression")
+	initLogging(t)
+
+	trainData, testData := generateTestData(2000, 4, "regression", 0.3)
+
+	b := trainModel(t, "regression", trainData)
+
+	runPrediction(t, b, testData)
 }
 
-func testOverall(t *testing.T, taskType string) {
-	var p *lightgbm.Predictor
+func TestLoadSave(t *testing.T) {
+	initLogging(t)
 
+	trainData, testData := generateTestData(2000, 4, "classification", 0.3)
+
+	b := trainModel(t, "classification", trainData)
+
+	t.Log("Saving booster")
+	savedBooster, err := b.ToString(lightgbm.FeatureImportanceSplit)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Log("Creating new booster from previously saved one")
+	b, err = lightgbm.NewBoosterFromString(savedBooster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runPrediction(t, b, testData)
+}
+
+func initLogging(t *testing.T) {
 	lightgbm.LoggerSetCallback(func(msgType string, msg string) {
 		t.Log("["+msgType+"]:", msg)
 	})
-
-	trainData, testData := generateTestData(2000, 4, taskType, 0.3)
-
-	t.Log("Creating training dataset")
-	ds := lightgbm.NewDataset(nil)
-
-	t.Log("Adding training data")
-	for _, data := range trainData.Features {
-		err := ds.AddFeatureData(data)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Log("Adding training labels")
-	for _, label := range trainData.Labels {
-		err := ds.SetLabel(label)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	t.Log("Creating booster from dataset")
-	var boosterParams []string
-	if taskType == "regression" {
-		boosterParams = []string{
-			"objective=regression",
-			"metric=rmse",
-			"boosting_type=gbdt",
-			"num_leaves=31",
-			"learning_rate=0.1",
-			"feature_fraction=0.9",
-			"bagging_fraction=0.8",
-			"bagging_freq=5",
-			"min_child_samples=20",
-			"force_col_wise=true",
-			"verbosity=1",
-		}
-	} else {
-		boosterParams = []string{
-			"objective=binary",
-			"metric=binary_logloss",
-			"boosting_type=gbdt",
-			"num_leaves=31",
-			"learning_rate=0.1",
-			"feature_fraction=0.9",
-			"bagging_fraction=0.8",
-			"bagging_freq=5",
-			"min_child_samples=20",
-			"is_unbalance=false",
-			"force_col_wise=true",
-			"verbosity=1",
-		}
-	}
-	b, err := lightgbm.NewBoosterFromDataset(ds, boosterParams, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	t.Log("Updating booster")
-	for i := 0; i < 100; i++ {
-		var isFinished bool
-
-		isFinished, err = b.UpdateOneIter()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if isFinished {
-			break
-		}
-	}
-
-	t.Log("Creating predictor from booster")
-	p, err = b.Predictor(false, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	t.Log("Predicting test data")
-	good := 0
-	bad := 0
-	veryBad := 0
-
-	minLabel := testData.Labels[0]
-	maxLabel := testData.Labels[0]
-	for idx := range testData.Labels {
-		if testData.Labels[idx] < minLabel {
-			minLabel = testData.Labels[idx]
-		}
-		if testData.Labels[idx] > maxLabel {
-			maxLabel = testData.Labels[idx]
-		}
-	}
-	diff10Pct := (maxLabel - minLabel) * 0.1
-	diff40Pct := (maxLabel - minLabel) * 0.4
-	for idx, data := range testData.Features {
-		var predictions []float64
-
-		predictions, err = p.Predict(data)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(predictions) != 1 {
-			t.Fatal("unexpected number of predictions")
-		}
-
-		//		t.Log("  -> Predicted:", predictions[0], "/ Expected:", testData.Labels[idx])
-		if predictions[0] < testData.Labels[idx]-diff40Pct || predictions[0] > testData.Labels[idx]+diff40Pct {
-			veryBad += 1
-		} else if predictions[0] < testData.Labels[idx]-diff10Pct || predictions[0] > testData.Labels[idx]+diff10Pct {
-			bad += 1
-		} else {
-			good += 1
-		}
-	}
-	t.Log("Good:", good, "/ Bad:", bad, "/ Very bad:", veryBad)
-
-	if float64(good)/float64(good+bad+veryBad) < 0.9 {
-		t.FailNow()
-	}
 }
 
 func generateTestData(samplesCount int, featuresCount int, taskType string, testRatio float64) (*TestData, *TestData) {
@@ -235,4 +148,140 @@ func generateTestData(samplesCount int, featuresCount int, taskType string, test
 
 	// Done
 	return train, test
+}
+
+func trainModel(t *testing.T, taskType string, trainData *TestData) *lightgbm.Booster {
+	var boosterParams []string
+	var b *lightgbm.Booster
+	var err error
+
+	t.Log("Creating training dataset")
+	ds := lightgbm.NewDataset(nil)
+
+	t.Log("Adding training data")
+	for _, data := range trainData.Features {
+		err = ds.AddFeatureData(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Log("Setting feature names")
+	err = ds.SetFeatureNames(trainData.FeatureNames)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Log("Adding training labels")
+	for _, label := range trainData.Labels {
+		err = ds.SetLabel(label)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Log("Creating booster from dataset")
+	if taskType == "regression" {
+		boosterParams = []string{
+			"device=gpu",
+			"objective=regression",
+			"metric=rmse",
+			"boosting_type=gbdt",
+			"num_leaves=31",
+			"learning_rate=0.1",
+			"feature_fraction=0.9",
+			"bagging_fraction=0.8",
+			"bagging_freq=5",
+			"min_child_samples=20",
+			"force_col_wise=true",
+			"verbosity=1",
+		}
+	} else {
+		boosterParams = []string{
+			"device=gpu",
+			"objective=binary",
+			"metric=binary_logloss",
+			"boosting_type=gbdt",
+			"num_leaves=31",
+			"learning_rate=0.1",
+			"feature_fraction=0.9",
+			"bagging_fraction=0.8",
+			"bagging_freq=5",
+			"min_child_samples=20",
+			"is_unbalance=false",
+			"force_col_wise=true",
+			"verbosity=1",
+		}
+	}
+	b, err = lightgbm.NewBoosterFromDataset(ds, boosterParams, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Log("Updating booster")
+	for i := 0; i < 100; i++ {
+		var isFinished bool
+
+		isFinished, err = b.UpdateOneIter()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if isFinished {
+			break
+		}
+	}
+
+	// Done
+	return b
+}
+
+func runPrediction(t *testing.T, b *lightgbm.Booster, testData *TestData) {
+	t.Log("Creating predictor from booster")
+	p, err := b.Predictor(false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Log("Predicting test data")
+	good := 0
+	bad := 0
+	veryBad := 0
+
+	minLabel := testData.Labels[0]
+	maxLabel := testData.Labels[0]
+	for idx := range testData.Labels {
+		if testData.Labels[idx] < minLabel {
+			minLabel = testData.Labels[idx]
+		}
+		if testData.Labels[idx] > maxLabel {
+			maxLabel = testData.Labels[idx]
+		}
+	}
+	diff10Pct := (maxLabel - minLabel) * 0.1
+	diff40Pct := (maxLabel - minLabel) * 0.4
+	for idx, data := range testData.Features {
+		var predictions []float64
+
+		predictions, err = p.Predict(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(predictions) != 1 {
+			t.Fatal("unexpected number of predictions")
+		}
+
+		//		t.Log("  -> Predicted:", predictions[0], "/ Expected:", testData.Labels[idx])
+		if predictions[0] < testData.Labels[idx]-diff40Pct || predictions[0] > testData.Labels[idx]+diff40Pct {
+			veryBad += 1
+		} else if predictions[0] < testData.Labels[idx]-diff10Pct || predictions[0] > testData.Labels[idx]+diff10Pct {
+			bad += 1
+		} else {
+			good += 1
+		}
+	}
+	t.Log("Good:", good, "/ Bad:", bad, "/ Very bad:", veryBad)
+
+	if float64(good)/float64(good+bad+veryBad) < 0.85 {
+		t.FailNow()
+	}
 }

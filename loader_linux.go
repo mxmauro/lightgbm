@@ -47,6 +47,7 @@ func loadLib(path string) error {
 		getProc("LGBM_DatasetCreateFromMat"),
 		getProc("LGBM_DatasetFree"),
 		getProc("LGBM_DatasetSetField"),
+		getProc("LGBM_DatasetSetFeatureNames"),
 
 		getProc("LGBM_BoosterCreate"),
 		getProc("LGBM_BoosterFree"),

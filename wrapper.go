@@ -16,6 +16,8 @@ import (
 
 #define C_API_DTYPE_FLOAT32 0
 #define C_API_DTYPE_FLOAT64 1
+#define C_API_DTYPE_INT32   2
+#define C_API_DTYPE_INT64   3
 
 #define C_API_FEATURE_IMPORTANCE_SPLIT 0
 #define C_API_FEATURE_IMPORTANCE_GAIN  1
@@ -54,6 +56,10 @@ typedef int (*lpfnLGBM_DatasetSetField)(DatasetHandle handle,
                                         const void* field_data,
                                         int num_element,
                                         int type);
+
+typedef int (*lpfnLGBM_DatasetSetFeatureNames)(DatasetHandle handle,
+                                               const char **feature_names,
+                                               int num_feature_names);
 
 typedef int (*lpfnLGBM_BoosterCreate)(const DatasetHandle train_data,
                                       const char* parameters,
@@ -118,9 +124,10 @@ typedef int (*lpfnLGBM_FastConfigFree)(FastConfigHandle fastConfig);
 static lpfnLGBM_GetLastError fnLGBM_GetLastError = nullptr;
 static lpfnLGBM_RegisterLogCallback fnLGBM_RegisterLogCallback = nullptr;
 
-static lpfnLGBM_DatasetCreateFromMat fnLGBM_DatasetCreateFromMat = nullptr;
-static lpfnLGBM_DatasetFree          fnLGBM_DatasetFree          = nullptr;
-static lpfnLGBM_DatasetSetField      fnLGBM_DatasetSetField      = nullptr;
+static lpfnLGBM_DatasetCreateFromMat   fnLGBM_DatasetCreateFromMat   = nullptr;
+static lpfnLGBM_DatasetFree            fnLGBM_DatasetFree            = nullptr;
+static lpfnLGBM_DatasetSetField        fnLGBM_DatasetSetField        = nullptr;
+static lpfnLGBM_DatasetSetFeatureNames fnLGBM_DatasetSetFeatureNames = nullptr;
 
 static lpfnLGBM_BoosterCreate              fnLGBM_BoosterCreate              = nullptr;
 static lpfnLGBM_BoosterFree                fnLGBM_BoosterFree                = nullptr;
@@ -145,6 +152,7 @@ static void savePointers(void *ptr_LGBM_GetLastError,
                          void *ptr_LGBM_DatasetCreateFromMat,
                          void *ptr_LGBM_DatasetFree,
                          void *ptr_LGBM_DatasetSetField,
+                         void *ptr_LGBM_DatasetSetFeatureNames,
                          void *ptr_LGBM_BoosterCreate,
                          void *ptr_LGBM_BoosterFree,
                          void *ptr_LGBM_BoosterAddValidData,
@@ -163,9 +171,10 @@ static void savePointers(void *ptr_LGBM_GetLastError,
     fnLGBM_GetLastError = (lpfnLGBM_GetLastError)ptr_LGBM_GetLastError;
     fnLGBM_RegisterLogCallback = (lpfnLGBM_RegisterLogCallback)ptr_LGBM_RegisterLogCallback;
 
-    fnLGBM_DatasetCreateFromMat = (lpfnLGBM_DatasetCreateFromMat)ptr_LGBM_DatasetCreateFromMat;
-    fnLGBM_DatasetFree          = (lpfnLGBM_DatasetFree         )ptr_LGBM_DatasetFree;
-    fnLGBM_DatasetSetField      = (lpfnLGBM_DatasetSetField     )ptr_LGBM_DatasetSetField;
+    fnLGBM_DatasetCreateFromMat   = (lpfnLGBM_DatasetCreateFromMat  )ptr_LGBM_DatasetCreateFromMat;
+    fnLGBM_DatasetFree            = (lpfnLGBM_DatasetFree           )ptr_LGBM_DatasetFree;
+    fnLGBM_DatasetSetField        = (lpfnLGBM_DatasetSetField       )ptr_LGBM_DatasetSetField;
+    fnLGBM_DatasetSetFeatureNames = (lpfnLGBM_DatasetSetFeatureNames)ptr_LGBM_DatasetSetFeatureNames;
 
     fnLGBM_BoosterCreate              = (lpfnLGBM_BoosterCreate             )ptr_LGBM_BoosterCreate;
     fnLGBM_BoosterFree                = (lpfnLGBM_BoosterFree               )ptr_LGBM_BoosterFree;
@@ -213,6 +222,13 @@ static int call_LGBM_DatasetSetField(DatasetHandle handle,
                                      int type)
 {
     return fnLGBM_DatasetSetField(handle, field_name, field_data, num_element, type);
+}
+
+static int call_LGBM_DatasetSetFeatureNames(DatasetHandle handle,
+                                            const char **feature_names,
+                                            int num_feature_names)
+{
+    return fnLGBM_DatasetSetFeatureNames(handle, feature_names, num_feature_names);
 }
 
 static int call_LGBM_BoosterCreate(const DatasetHandle train_data,
@@ -343,14 +359,14 @@ func goLoggerCallback(cMsg *C.char) {
 	}
 }
 
-func datasetCreateFromMat(features []float64, featuresCount int, parameters string, refHandle unsafe.Pointer) (unsafe.Pointer, error) {
+func datasetCreateFromMat(features []float64, rowsCount int, parameters string, refHandle unsafe.Pointer) (unsafe.Pointer, error) {
 	var handle unsafe.Pointer
 
-	if len(features) == 0 || featuresCount <= 0 {
-		return nil, errors.New("features count is zero")
+	if len(features) == 0 || rowsCount <= 0 {
+		return nil, errors.New("no data provided or number of rows is not positive")
 	}
 
-	rowsCount := len(features) / featuresCount
+	featuresCount := len(features) / rowsCount
 
 	if len(features) != featuresCount*rowsCount {
 		return nil, errors.New("feature is not a matrix")
@@ -448,6 +464,71 @@ func datasetSetFieldFloat32(handle unsafe.Pointer, field string, values []float3
 		C.int(C.C_API_DTYPE_FLOAT32),
 	)
 	runtime.KeepAlive(values) // Yes, keep-alive should be placed after the position where is used
+	if ret != 0 {
+		return getLastError()
+	}
+
+	// Done
+	return nil
+}
+
+func datasetSetFieldInt32(handle unsafe.Pointer, field string, values []int32) error {
+	if handle == nil {
+		return errInvalidHandle
+	}
+
+	// Convert parameters
+	cFieldName := C.CString(field)
+	defer C.free(unsafe.Pointer(cFieldName))
+
+	// Lock thread
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	// Set field
+	ret := C.call_LGBM_DatasetSetField(
+		C.DatasetHandle(handle),
+		cFieldName,
+		unsafe.Pointer(&values[0]),
+		C.int(len(values)),
+		C.int(C.C_API_DTYPE_INT32),
+	)
+	runtime.KeepAlive(values) // Yes, keep-alive should be placed after the position where is used
+	if ret != 0 {
+		return getLastError()
+	}
+
+	// Done
+	return nil
+}
+
+func datasetSetFeatureNames(handle unsafe.Pointer, names []string) error {
+	if handle == nil {
+		return errInvalidHandle
+	}
+
+	// Convert parameters
+	cNamesArray := make([]*C.char, len(names))
+	for idx, name := range names {
+		cNamesArray[idx] = C.CString(name)
+	}
+	defer func() {
+		for idx := range names {
+			C.free(unsafe.Pointer(cNamesArray[idx]))
+		}
+	}()
+
+	// Lock thread
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	// Set field
+	ret := C.call_LGBM_DatasetSetFeatureNames(
+		C.DatasetHandle(handle),
+		(**C.char)(unsafe.Pointer(&cNamesArray[0])),
+		C.int(len(names)),
+	)
+	runtime.KeepAlive(names) // Yes, keep-alive should be placed after the position where is used
 	if ret != 0 {
 		return getLastError()
 	}
@@ -630,6 +711,12 @@ func boosterSaveModelToString(handle unsafe.Pointer, featureImportance int) (str
 	}
 
 	// Done
+	for outLen > 0 {
+		if buf[int(outLen)-1] != 0 {
+			break
+		}
+		outLen -= 1
+	}
 	return string(buf[:int(outLen)]), nil
 }
 
@@ -804,6 +891,7 @@ func savePointers(
 	ptr_LGBM_DatasetCreateFromMat unsafe.Pointer,
 	ptr_LGBM_DatasetFree unsafe.Pointer,
 	ptr_LGBM_DatasetSetField unsafe.Pointer,
+	ptr_LGBM_DatasetSetFeatureNames unsafe.Pointer,
 	ptr_LGBM_BoosterCreate unsafe.Pointer,
 	ptr_LGBM_BoosterFree unsafe.Pointer,
 	ptr_LGBM_BoosterAddValidData unsafe.Pointer,
@@ -825,6 +913,7 @@ func savePointers(
 		ptr_LGBM_DatasetCreateFromMat,
 		ptr_LGBM_DatasetFree,
 		ptr_LGBM_DatasetSetField,
+		ptr_LGBM_DatasetSetFeatureNames,
 		ptr_LGBM_BoosterCreate,
 		ptr_LGBM_BoosterFree,
 		ptr_LGBM_BoosterAddValidData,
